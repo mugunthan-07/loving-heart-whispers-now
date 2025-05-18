@@ -1,10 +1,10 @@
-
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { MapPin, Camera, Clock } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { toast } from "@/components/ui/sonner";
+import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 
 // Define the office location (should be replaced with actual coordinates)
 const OFFICE_LOCATION = {
@@ -36,6 +36,8 @@ const Attendance = () => {
   const [hasCheckedIn, setHasCheckedIn] = useState(false);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isSheetOpen, setIsSheetOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const navigate = useNavigate();
@@ -67,6 +69,11 @@ const Attendance = () => {
 
     // Get current location
     getCurrentLocation();
+
+    // Cleanup camera when component unmounts
+    return () => {
+      stopCamera();
+    };
   }, [navigate]);
 
   const getCurrentLocation = () => {
@@ -119,18 +126,44 @@ const Attendance = () => {
   };
 
   const startCamera = async () => {
+    setCameraError(null);
     try {
-      if (!videoRef.current) return;
+      if (!videoRef.current) {
+        console.error("Video reference not available");
+        return;
+      }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user" },
+      // Request camera permissions with clear constraints
+      const constraints = {
+        video: { 
+          facingMode: "user",
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
         audio: false,
-      });
+      };
       
-      videoRef.current.srcObject = stream;
-      setIsCameraActive(true);
+      console.log("Requesting camera access with constraints:", constraints);
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.onloadedmetadata = () => {
+          if (videoRef.current) {
+            videoRef.current.play()
+              .catch(e => {
+                console.error("Error playing video:", e);
+                setCameraError("Failed to start camera playback");
+              });
+          }
+        };
+        setIsCameraActive(true);
+        toast.success("Camera access granted");
+      }
     } catch (err) {
       console.error("Error accessing camera:", err);
+      const errorMessage = err instanceof Error ? err.message : "Unknown error";
+      setCameraError(`Camera access denied: ${errorMessage}`);
       toast.error("Failed to access camera. Please check your permissions.");
     }
   };
@@ -138,38 +171,57 @@ const Attendance = () => {
   const stopCamera = () => {
     if (!videoRef.current || !videoRef.current.srcObject) return;
     
-    const stream = videoRef.current.srcObject as MediaStream;
-    const tracks = stream.getTracks();
-    
-    tracks.forEach(track => track.stop());
-    videoRef.current.srcObject = null;
-    setIsCameraActive(false);
+    try {
+      const stream = videoRef.current.srcObject as MediaStream;
+      const tracks = stream.getTracks();
+      
+      tracks.forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+      setIsCameraActive(false);
+    } catch (error) {
+      console.error("Error stopping camera:", error);
+    }
   };
 
   const capturePhoto = () => {
     if (!videoRef.current || !canvasRef.current) return null;
     
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext("2d");
-    
-    if (!context) return null;
-    
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
-    return canvas.toDataURL("image/jpeg");
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const context = canvas.getContext("2d");
+      
+      if (!context) return null;
+      
+      // Set canvas dimensions to match the video
+      canvas.width = video.videoWidth || 320;
+      canvas.height = video.videoHeight || 240;
+      
+      // Draw the current video frame to the canvas
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      return canvas.toDataURL("image/jpeg", 0.85); // Slightly improved quality
+    } catch (error) {
+      console.error("Error capturing photo:", error);
+      return null;
+    }
   };
 
   const handleAttendance = (type: "check-in" | "check-out") => {
-    if (!currentUser || !currentLocation) return;
+    if (!currentUser || !currentLocation) {
+      toast.error("User information or location not available");
+      return;
+    }
 
     // Take photo if camera is active
     let photoUrl;
     if (isCameraActive) {
       photoUrl = capturePhoto();
-      stopCamera();
+      if (!photoUrl) {
+        toast.warning("Could not capture photo, but proceeding with attendance");
+      }
+    } else {
+      toast.warning("No photo will be taken as camera is not active");
     }
 
     // Create attendance record
@@ -189,6 +241,10 @@ const Attendance = () => {
     // Save to localStorage (in a real app, this would go to a server)
     localStorage.setItem("attendanceRecords", JSON.stringify(updatedRecords));
 
+    // Close the camera sheet if open
+    setIsSheetOpen(false);
+    stopCamera();
+
     // Update UI
     if (type === "check-in") {
       setHasCheckedIn(true);
@@ -204,11 +260,13 @@ const Attendance = () => {
   };
 
   const handleLogout = () => {
+    stopCamera();
     localStorage.removeItem("currentUser");
     navigate("/");
   };
 
   const viewHistory = () => {
+    stopCamera();
     navigate("/history");
   };
 
@@ -271,33 +329,83 @@ const Attendance = () => {
           )}
         </div>
 
-        <div className="bg-white rounded-lg shadow p-4 mb-4">
-          <h2 className="text-lg font-medium mb-2">Camera</h2>
-          
-          <div className="relative aspect-video bg-gray-100 mb-2 rounded overflow-hidden">
-            {isCameraActive ? (
-              <video 
-                ref={videoRef} 
-                autoPlay 
-                playsInline 
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <div className="flex items-center justify-center h-full">
-                <Camera className="h-10 w-10 text-gray-400" />
+        <Sheet open={isSheetOpen} onOpenChange={setIsSheetOpen}>
+          <SheetTrigger asChild>
+            <Button 
+              className="w-full mb-4"
+              onClick={() => setIsSheetOpen(true)}
+            >
+              <Camera className="mr-2 h-4 w-4" /> Open Camera
+            </Button>
+          </SheetTrigger>
+          <SheetContent className="p-0 sm:max-w-md w-full">
+            <div className="p-4 space-y-4">
+              <h2 className="text-lg font-bold">Camera</h2>
+              
+              <div className="relative aspect-video bg-black mb-2 rounded overflow-hidden">
+                {isCameraActive ? (
+                  <video 
+                    ref={videoRef} 
+                    autoPlay 
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full text-white p-4 text-center">
+                    <Camera className="h-10 w-10 mb-2" />
+                    {cameraError ? (
+                      <p className="text-red-400 text-sm">{cameraError}</p>
+                    ) : (
+                      <p>Press the button below to start your camera</p>
+                    )}
+                  </div>
+                )}
+                <canvas ref={canvasRef} className="hidden" />
               </div>
-            )}
-            <canvas ref={canvasRef} className="hidden" />
-          </div>
-          
-          <Button 
-            onClick={isCameraActive ? stopCamera : startCamera} 
-            variant="outline"
-            className="w-full"
-          >
-            {isCameraActive ? "Stop Camera" : "Start Camera"}
-          </Button>
-        </div>
+              
+              {!isCameraActive ? (
+                <Button 
+                  onClick={startCamera} 
+                  className="w-full"
+                >
+                  Start Camera
+                </Button>
+              ) : (
+                <div className="grid grid-cols-2 gap-4">
+                  <Button 
+                    variant="outline"
+                    onClick={stopCamera}
+                  >
+                    Stop Camera
+                  </Button>
+                  
+                  <Button
+                    onClick={() => handleAttendance(hasCheckedIn ? "check-out" : "check-in")}
+                    disabled={isLoading}
+                  >
+                    <Clock className="mr-2 h-4 w-4" />
+                    {hasCheckedIn ? "Check Out" : "Check In"}
+                  </Button>
+                </div>
+              )}
+              
+              {cameraError && (
+                <Alert className="bg-red-50 mt-4">
+                  <AlertDescription className="text-sm">
+                    <p className="font-medium">Troubleshooting tips:</p>
+                    <ul className="list-disc pl-5 mt-2 space-y-1">
+                      <li>Make sure you've granted camera permissions</li>
+                      <li>Try using a different browser</li>
+                      <li>Check if another app is using your camera</li>
+                      <li>Reload the page and try again</li>
+                    </ul>
+                  </AlertDescription>
+                </Alert>
+              )}
+            </div>
+          </SheetContent>
+        </Sheet>
 
         <div className="bg-white rounded-lg shadow p-4">
           <h2 className="text-lg font-medium mb-4">Mark Attendance</h2>
