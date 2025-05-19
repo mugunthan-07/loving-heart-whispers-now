@@ -4,7 +4,20 @@ import { Button } from "@/components/ui/button";
 import { MapPin, Camera, Clock } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { toast } from "@/components/ui/sonner";
-import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import { 
+  Sheet, 
+  SheetContent, 
+  SheetTrigger,
+  SheetTitle,
+  SheetDescription
+} from "@/components/ui/sheet";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription
+} from "@/components/ui/dialog";
 
 // Define the office location (should be replaced with actual coordinates)
 const OFFICE_LOCATION = {
@@ -38,8 +51,10 @@ const Attendance = () => {
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isSheetOpen, setIsSheetOpen] = useState(false);
+  const [showPermissionDialog, setShowPermissionDialog] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -127,12 +142,25 @@ const Attendance = () => {
 
   const startCamera = async () => {
     setCameraError(null);
-    try {
-      if (!videoRef.current) {
-        console.error("Video reference not available");
-        return;
-      }
+    
+    // Check if the browser supports getUserMedia
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraError("Your browser doesn't support camera access");
+      toast.error("Camera not supported by your browser");
+      return;
+    }
+    
+    // Check if the video element exists
+    if (!videoRef.current) {
+      console.error("Video reference not available");
+      setCameraError("Camera element not initialized properly");
+      return;
+    }
 
+    try {
+      // Stop any existing stream
+      stopCamera();
+      
       // Request camera permissions with clear constraints
       const constraints = {
         video: { 
@@ -144,54 +172,74 @@ const Attendance = () => {
       };
       
       console.log("Requesting camera access with constraints:", constraints);
+      
+      // Request camera access
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
           if (videoRef.current) {
             videoRef.current.play()
+              .then(() => {
+                setIsCameraActive(true);
+                toast.success("Camera activated successfully");
+              })
               .catch(e => {
                 console.error("Error playing video:", e);
                 setCameraError("Failed to start camera playback");
+                toast.error("Camera access granted but playback failed");
               });
           }
         };
-        setIsCameraActive(true);
-        toast.success("Camera access granted");
       }
     } catch (err) {
       console.error("Error accessing camera:", err);
       const errorMessage = err instanceof Error ? err.message : "Unknown error";
-      setCameraError(`Camera access denied: ${errorMessage}`);
-      toast.error("Failed to access camera. Please check your permissions.");
+      
+      // Check for permission denied error
+      if (errorMessage.includes('Permission denied') || errorMessage.includes('NotAllowedError')) {
+        setCameraError("Camera permission denied. Please check your browser settings.");
+        setShowPermissionDialog(true);
+      } else {
+        setCameraError(`Camera access error: ${errorMessage}`);
+      }
+      
+      toast.error("Failed to access camera");
     }
   };
 
   const stopCamera = () => {
-    if (!videoRef.current || !videoRef.current.srcObject) return;
-    
-    try {
-      const stream = videoRef.current.srcObject as MediaStream;
-      const tracks = stream.getTracks();
-      
-      tracks.forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-      setIsCameraActive(false);
-    } catch (error) {
-      console.error("Error stopping camera:", error);
+    // Stop all media tracks from the stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
     }
+    
+    // Clear the video source
+    if (videoRef.current && videoRef.current.srcObject) {
+      videoRef.current.srcObject = null;
+    }
+    
+    setIsCameraActive(false);
   };
 
   const capturePhoto = () => {
-    if (!videoRef.current || !canvasRef.current) return null;
+    if (!videoRef.current || !canvasRef.current) {
+      console.warn("Cannot capture photo: video or canvas reference missing");
+      return null;
+    }
     
     try {
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      const context = canvas.getContext("2d");
+      const context = canvas.getContext('2d');
       
-      if (!context) return null;
+      if (!context) {
+        console.warn("Cannot capture photo: canvas context is null");
+        return null;
+      }
       
       // Set canvas dimensions to match the video
       canvas.width = video.videoWidth || 320;
@@ -200,9 +248,11 @@ const Attendance = () => {
       // Draw the current video frame to the canvas
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       
-      return canvas.toDataURL("image/jpeg", 0.85); // Slightly improved quality
+      // Convert canvas to image data URL (JPEG format with 85% quality)
+      return canvas.toDataURL('image/jpeg', 0.85);
     } catch (error) {
       console.error("Error capturing photo:", error);
+      toast.error("Failed to capture photo");
       return null;
     }
   };
@@ -340,7 +390,8 @@ const Attendance = () => {
           </SheetTrigger>
           <SheetContent className="p-0 sm:max-w-md w-full">
             <div className="p-4 space-y-4">
-              <h2 className="text-lg font-bold">Camera</h2>
+              <SheetTitle>Camera</SheetTitle>
+              <SheetDescription>Take a photo for attendance verification</SheetDescription>
               
               <div className="relative aspect-video bg-black mb-2 rounded overflow-hidden">
                 {isCameraActive ? (
@@ -432,6 +483,40 @@ const Attendance = () => {
           </div>
         </div>
       </div>
+
+      <Dialog open={showPermissionDialog} onOpenChange={setShowPermissionDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Camera Permission Required</DialogTitle>
+            <DialogDescription>
+              To use the attendance system's photo verification feature, you need to allow camera access.
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="space-y-4 mt-4">
+            <h3 className="font-medium">How to enable camera access:</h3>
+            <ol className="list-decimal pl-5 space-y-2">
+              <li>Click on the camera/lock icon in your browser's address bar</li>
+              <li>Select "Allow" for the camera permission</li>
+              <li>Refresh the page after changing permissions</li>
+            </ol>
+            
+            <div className="bg-amber-50 p-3 rounded border border-amber-200 text-amber-800 text-sm">
+              <p>If you don't see the permission prompt, you may need to reset permissions in your browser settings.</p>
+            </div>
+            
+            <Button 
+              className="w-full" 
+              onClick={() => {
+                setShowPermissionDialog(false);
+                startCamera(); // Try accessing the camera again
+              }}
+            >
+              Try Again
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
